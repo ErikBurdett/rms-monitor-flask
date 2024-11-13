@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Domain Monitor</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/css/bootstrap.min.css">
+    
+    <!-- DataTables CSS -->
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.10.24/css/jquery.dataTables.min.css">
+    
+    <style>
+        .up {
+            color: green;
+            font-weight: bold;
+        }
+        .down {
+            color: red;
+            font-weight: bold;
+        }
+        .refresh-btn, .manual-btn {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mt-5">Domain Monitor</h1>
+        <p id="last-updated">Last Updated: Loading...</p>
+        
+        <!-- Refresh Button -->
+        <button class="btn btn-primary refresh-btn" onclick="window.location.reload();">Refresh</button>
+        
+        <!-- Manual Monitoring Button -->
+        <form action="{{ url_for('monitor.run_monitor') }}" method="post" style="display: inline;">
+            <button type="submit" class="btn btn-success manual-btn">Run Monitor Now</button>
+        </form>
+        
+        <!-- Optional: Display a Message After Manual Run -->
+        {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            <div class="alert alert-info mt-3">
+                {{ messages[0] }}
+            </div>
+        {% endif %}
+        {% endwith %}
+
+        <!-- DataTables Integration -->
+        <table id="domain-monitor-table" class="table table-striped">
+            <thead>
+                <tr>
+                    <th>Domain</th>
+                    <th>Status</th>
+                    <th>IP Address</th>
+                    <th>Response Time (s)</th>
+                    <th>Status Code</th>
+                    <th>Last Checked (CST)</th>
+                    <th>SSL Expiration (CST)</th>
+                    <th>SSL Info</th>
+                    <th>FB Pixel</th>
+                    <th>GA Tag</th>
+                    <th>Tag Info</th>
+                </tr>
+            </thead>
+            <tbody id="domain-status-table">
+                <!-- Rows will be dynamically populated here -->
+            </tbody>
+        </table>
+    </div>
+
+    <!-- SSL Info Modal -->
+    <div class="modal fade" id="sslInfoModal" tabindex="-1" aria-labelledby="sslInfoModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="sslInfoModalLabel">SSL Certificate Information</h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <pre id="sslInfoContent">Loading...</pre>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tag Info Modal -->
+    <div class="modal fade" id="tagInfoModal" tabindex="-1" aria-labelledby="tagInfoModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="tagInfoModalLabel">Tag Information</h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <pre id="tagInfoContent">Loading...</pre>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Include jQuery (required for DataTables) -->
+    <script src="https://code.jquery.com/jquery-3.5.1.js"></script>
+
+    <!-- Include Bootstrap JS and dependencies -->
+    <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.0/js/bootstrap.min.js"></script>
+    
+    <!-- Include DataTables JS -->
+    <script src="https://cdn.datatables.net/1.10.24/js/jquery.dataTables.min.js"></script>
+
+    <script>
+        // Function to handle UTF-8 to Base64 encoding
+        function utf8ToBase64(str) {
+            return btoa(unescape(encodeURIComponent(str)));
+        }
+
+        // Function to handle Base64 to UTF-8 decoding
+        function base64ToUtf8(str) {
+            return decodeURIComponent(escape(atob(str)));
+        }
+
+        // Initialize DataTables and keep a reference to its instance
+        let table;
+
+        $(document).ready(function() {
+            table = $('#domain-monitor-table').DataTable({
+                "order": [],  // Disable initial sorting if desired
+                "rowId": function(a) {
+                    return 'row-' + a[0]; // Assuming the first column is 'Domain'
+                },
+                "lengthMenu": [ [150, 250, 350], [150, 250, 350] ] // Custom entries per page
+            });
+        });
+
+        const source = new EventSource("/monitor/domain_status_stream");
+
+        // Function to convert UTC time to CST
+        function convertUtcToCst(dateString) {
+            const date = new Date(dateString);
+            const options = { timeZone: 'America/Chicago', hour12: false };
+            return date.toLocaleString('en-US', options);
+        }
+
+        // Function to open SSL Info Modal
+        function openSSLInfoModal(certInfo, domain) {
+            const modal = $('#sslInfoModal');
+            let content = '';
+
+            if (certInfo) {
+                content += `Domain: ${domain}\n`;
+                content += `Subject:\n`;
+                for (const [key, value] of Object.entries(certInfo.subject)) {
+                    content += `  ${key}: ${value}\n`;
+                }
+                content += `Issuer:\n`;
+                for (const [key, value] of Object.entries(certInfo.issuer)) {
+                    content += `  ${key}: ${value}\n`;
+                }
+                content += `Version: ${certInfo.version}\n`;
+                content += `Serial Number: ${certInfo.serialNumber}\n`;
+                content += `Valid From: ${certInfo.notBefore ? convertUtcToCst(certInfo.notBefore) : 'N/A'}\n`;
+                content += `Valid To: ${certInfo.notAfter ? convertUtcToCst(certInfo.notAfter) : 'N/A'}\n`;
+                if (certInfo.subjectAltName) {
+                    content += `Subject Alternative Names:\n`;
+                    certInfo.subjectAltName.forEach(alt => {
+                        content += `  ${alt[0]}: ${alt[1]}\n`;
+                    });
+                }
+            } else {
+                content = "No SSL certificate information available.";
+            }
+
+            $('#sslInfoContent').text(content);
+            modal.modal('show');
+        }
+
+        // Function to open Tag Info Modal
+        function openTagInfoModal(tagInfo, domain) {
+            const modal = $('#tagInfoModal');
+            let content = `Domain: ${domain}\n\n`;
+
+            if (tagInfo.fb_pixel) {
+                content += `Facebook Pixel Code:\n${base64ToUtf8(tagInfo.fb_pixel)}\n\n`;
+            } else {
+                content += `Facebook Pixel Code: Not Found\n\n`;
+            }
+
+            if (tagInfo.ga_tag) {
+                content += `Google Analytics Tag Code:\n${base64ToUtf8(tagInfo.ga_tag)}\n`;
+            } else {
+                content += `Google Analytics Tag Code: Not Found\n`;
+            }
+
+            $('#tagInfoContent').text(content);
+            modal.modal('show');
+        }
+
+        // Event listener for dynamically created SSL Info button
+        $(document).on('click', '.ssl-info-btn', function() {
+            try {
+                const certInfo = JSON.parse(atob($(this).attr('data-cert')));
+                const domain = $(this).attr('data-domain');
+                openSSLInfoModal(certInfo, domain);
+            } catch (e) {
+                console.error('Error parsing SSL info data:', e);
+            }
+        });
+
+        // Event listener for dynamically created Tag Info button
+        $(document).on('click', '.tag-info-btn', function() {
+            try {
+                const tagInfo = JSON.parse(atob($(this).attr('data-tags')));
+                const domain = $(this).attr('data-domain');
+                openTagInfoModal(tagInfo, domain);
+            } catch (e) {
+                console.error('Error parsing tag info data:', e);
+            }
+        });
+
+        // Listen for incoming domain status updates
+        source.onmessage = function(event) {
+            const domainStatuses = JSON.parse(event.data);
+            const lastUpdated = document.getElementById("last-updated");
+
+            let latestCheckTime = null;
+
+            for (const [domain, status] of Object.entries(domainStatuses)) {
+                const rowId = `row-${domain}`;
+                const escapedRowId = CSS.escape(rowId);
+                const existingRow = table.row(`#${escapedRowId}`);
+
+                const rowData = [
+                    domain,
+                    status.is_up ? '<span class="up">UP</span>' : '<span class="down">DOWN</span>',
+                    status.ip_address || "N/A",
+                    status.response_time !== null ? status.response_time : "N/A",
+                    status.status_code || "N/A",
+                    convertUtcToCst(status.last_checked),
+                    status.ssl_info && status.ssl_info.notAfter ? convertUtcToCst(status.ssl_info.notAfter) : "N/A",
+                    status.ssl_info ? `<button class="btn btn-info btn-sm ssl-info-btn" data-cert='${btoa(JSON.stringify(status.ssl_info))}' data-domain='${domain}'>View SSL Info</button>` : "N/A",
+                    status.fb_pixel ? '<span class="up">Present</span>' : '<span class="down">Not Found</span>',
+                    status.ga_tag ? '<span class="up">Present</span>' : '<span class="down">Not Found</span>',
+                    `<button class="btn btn-info btn-sm tag-info-btn" data-tags='${btoa(JSON.stringify({ fb_pixel: status.fb_pixel_code ? utf8ToBase64(status.fb_pixel_code) : null, ga_tag: status.ga_tag_code ? utf8ToBase64(status.ga_tag_code) : null }))}' data-domain='${domain}'>View Tag Info</button>`
+                ];
+
+                if (existingRow.any()) {
+                    existingRow.data(rowData).draw(false);
+                } else {
+                    table.row.add(rowData).draw(false);
+                }
+
+                const currentCheckTime = new Date(status.last_checked);
+                if (!latestCheckTime || currentCheckTime > latestCheckTime) {
+                    latestCheckTime = currentCheckTime;
+                }
+            }
+
+            if (latestCheckTime) {
+                lastUpdated.textContent = "Last Updated: " + convertUtcToCst(latestCheckTime.toISOString());
+            }
+        };
+    </script>
+</body>
+</html>
